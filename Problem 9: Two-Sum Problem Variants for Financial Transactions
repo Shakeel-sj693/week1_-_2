@@ -1,0 +1,370 @@
+package com.example;
+
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+/**
+ * Problem 9: Two-Sum variants for financial transactions
+ *
+ * Notes on performance:
+ * - Classic two-sum (all pairs): O(n + P) time, O(n) memory where P = number of output pairs.
+ * - Time-window two-sum: O(n log n) for sort + O(n + P) scan.
+ * - K-sum: typically O(n^(k-1)) worst-case; suitable when k is small and/or input is pre-filtered.
+ * - Duplicate detection: O(n) time, O(n) memory.
+ *
+ * Amounts are stored as cents (long) to avoid floating point errors.
+ */
+public class Main {
+
+    // -------------------- Data Model --------------------
+
+    public static final class Transaction {
+        public final long id;
+        public final String accountId;
+        public final String merchant;
+        public final long amountCents;
+        public final long timestampMs;
+
+        public Transaction(long id, String accountId, String merchant, long amountCents, long timestampMs) {
+            this.id = id;
+            this.accountId = Objects.requireNonNull(accountId, "accountId");
+            this.merchant = Objects.requireNonNull(merchant, "merchant");
+            this.amountCents = amountCents;
+            this.timestampMs = timestampMs;
+        }
+
+        @Override
+        public String toString() {
+            return "Tx{id=" + id +
+                    ", acct=" + accountId +
+                    ", merch=" + merchant +
+                    ", amount=" + amountCents +
+                    ", t=" + timestampMs + "}";
+        }
+    }
+
+    public static final class TxPair {
+        public final long id1;
+        public final long id2;
+
+        public TxPair(long id1, long id2) {
+            if (id1 == id2) throw new IllegalArgumentException("pair must contain distinct transaction IDs");
+            // normalize to stable ordering
+            if (id1 < id2) {
+                this.id1 = id1;
+                this.id2 = id2;
+            } else {
+                this.id1 = id2;
+                this.id2 = id1;
+            }
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (!(o instanceof TxPair)) return false;
+            TxPair other = (TxPair) o;
+            return id1 == other.id1 && id2 == other.id2;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(id1, id2);
+        }
+
+        @Override
+        public String toString() {
+            return "(" + id1 + ", " + id2 + ")";
+        }
+    }
+
+    public static final class DuplicateGroup {
+        public final long amountCents;
+        public final String merchant;
+        public final Set<String> accounts;      // distinct accounts involved
+        public final List<Long> transactionIds; // all tx IDs in this group
+
+        public DuplicateGroup(long amountCents, String merchant, Set<String> accounts, List<Long> transactionIds) {
+            this.amountCents = amountCents;
+            this.merchant = merchant;
+            this.accounts = accounts;
+            this.transactionIds = transactionIds;
+        }
+
+        @Override
+        public String toString() {
+            return "{amount=" + amountCents + ", merchant=\"" + merchant + "\", accounts=" + accounts + ", txIds=" + transactionIds + "}";
+        }
+    }
+
+    // -------------------- Algorithms --------------------
+
+    /**
+     * Classic Two-Sum: return all unique pairs of transaction IDs whose amounts sum to target.
+     *
+     * Approach:
+     * - For each tx with amount a, complement c = target - a.
+     * - If we already saw any tx with amount c, pair current tx with each of them.
+     * - Store txs by amount.
+     */
+    public static List<TxPair> findTwoSumAllPairs(List<Transaction> transactions, long targetCents) {
+        Map<Long, List<Transaction>> seenByAmount = new HashMap<>(Math.max(16, transactions.size() * 2));
+        List<TxPair> out = new ArrayList<>();
+
+        for (Transaction tx : transactions) {
+            long complement = targetCents - tx.amountCents;
+            List<Transaction> complementList = seenByAmount.get(complement);
+            if (complementList != null) {
+                for (Transaction prev : complementList) {
+                    out.add(new TxPair(prev.id, tx.id));
+                }
+            }
+            seenByAmount.computeIfAbsent(tx.amountCents, k -> new ArrayList<>(1)).add(tx);
+        }
+
+        // If you want to ensure uniqueness (in case of weird inputs / duplicates), you can de-dup:
+        // return new ArrayList<>(new LinkedHashSet<>(out));
+        return out;
+    }
+
+    /**
+     * Two-Sum within a time window: return pairs (i, j) such that:
+     * - amounts sum to target
+     * - |time_i - time_j| <= windowMs
+     *
+     * Efficient streaming approach after sorting by time:
+     * - Maintain a sliding window [left..right] over time.
+     * - Maintain a map amount -> list of txs currently in window.
+     * - For each incoming tx at index r:
+     *    - evict txs older than (tx.time - window)
+     *    - find complement in window map and emit pairs
+     *    - add current tx to window map
+     *
+     * Complexity: O(n log n + P).
+     */
+    public static List<TxPair> findTwoSumPairsWithinWindow(List<Transaction> transactions, long targetCents, long windowMs) {
+        List<Transaction> sorted = new ArrayList<>(transactions);
+        sorted.sort(Comparator.comparingLong(t -> t.timestampMs));
+
+        Map<Long, Deque<Transaction>> windowByAmount = new HashMap<>(Math.max(16, sorted.size() * 2));
+        Deque<Transaction> windowAll = new ArrayDeque<>();
+
+        List<TxPair> out = new ArrayList<>();
+
+        for (Transaction tx : sorted) {
+            long minAllowed = tx.timestampMs - windowMs;
+
+            // evict old transactions from the left of the windowAll deque
+            while (!windowAll.isEmpty() && windowAll.peekFirst().timestampMs < minAllowed) {
+                Transaction old = windowAll.pollFirst();
+                Deque<Transaction> dq = windowByAmount.get(old.amountCents);
+                // dq's head should match old if we always add/remove consistently
+                if (dq != null) {
+                    // remove one instance
+                    // (since amounts may repeat, we remove by identity scanning from front)
+                    while (!dq.isEmpty() && dq.peekFirst().timestampMs < minAllowed) {
+                        // NOTE: This is safe because if timestamp < minAllowed, it must be evicted
+                        dq.pollFirst();
+                    }
+                    if (dq.isEmpty()) windowByAmount.remove(old.amountCents);
+                }
+            }
+
+            long complement = targetCents - tx.amountCents;
+            Deque<Transaction> matches = windowByAmount.get(complement);
+            if (matches != null) {
+                for (Transaction prev : matches) {
+                    // prev.timestampMs is guaranteed >= minAllowed due to eviction
+                    out.add(new TxPair(prev.id, tx.id));
+                }
+            }
+
+            windowAll.addLast(tx);
+            windowByAmount.computeIfAbsent(tx.amountCents, k -> new ArrayDeque<>()).addLast(tx);
+        }
+
+        return out;
+    }
+
+    /**
+     * Duplicate detection:
+     * "Same amount, same merchant, different accounts"
+     *
+     * Returns groups where:
+     * - merchant+amount key occurs across >= 2 distinct accounts
+     */
+    public static List<DuplicateGroup> detectDuplicatesByAmountAndMerchant(List<Transaction> transactions) {
+        Map<String, MerchantAmountBucket> buckets = new HashMap<>(Math.max(16, transactions.size() * 2));
+
+        for (Transaction tx : transactions) {
+            String key = merchantAmountKey(tx.merchant, tx.amountCents);
+            MerchantAmountBucket b = buckets.computeIfAbsent(key, k -> new MerchantAmountBucket(tx.merchant, tx.amountCents));
+            b.accounts.add(tx.accountId);
+            b.txIds.add(tx.id);
+        }
+
+        List<DuplicateGroup> out = new ArrayList<>();
+        for (MerchantAmountBucket b : buckets.values()) {
+            if (b.accounts.size() >= 2) {
+                out.add(new DuplicateGroup(b.amountCents, b.merchant, new LinkedHashSet<>(b.accounts), new ArrayList<>(b.txIds)));
+            }
+        }
+
+        // stable sort for readable output
+        out.sort(Comparator.comparing((DuplicateGroup g) -> g.merchant).thenComparingLong(g -> g.amountCents));
+        return out;
+    }
+
+    private static final class MerchantAmountBucket {
+        final String merchant;
+        final long amountCents;
+        final Set<String> accounts = new HashSet<>();
+        final List<Long> txIds = new ArrayList<>();
+
+        MerchantAmountBucket(String merchant, long amountCents) {
+            this.merchant = merchant;
+            this.amountCents = amountCents;
+        }
+    }
+
+    private static String merchantAmountKey(String merchant, long amountCents) {
+        // safe-ish composite key (merchant can contain '|', but collision risk is negligible for demo;
+        // use a record key class in production)
+        return merchant + "|" + amountCents;
+    }
+
+    /**
+     * K-Sum:
+     * Returns combinations of transaction IDs of size k summing to target.
+     *
+     * Practical notes:
+     * - K-sum can explode in output size; in fraud systems you almost always apply filters
+     *   (time window, account/merchant scope, max results, etc.).
+     * - This implementation sorts by amount and uses recursion with 2-sum base.
+     */
+    public static List<List<Long>> findKSum(List<Transaction> transactions, int k, long targetCents) {
+        if (k < 2) throw new IllegalArgumentException("k must be >= 2");
+        List<Transaction> sorted = new ArrayList<>(transactions);
+        sorted.sort(Comparator
+                .comparingLong((Transaction t) -> t.amountCents)
+                .thenComparingLong(t -> t.id));
+
+        List<List<Long>> out = new ArrayList<>();
+        kSumRecursive(sorted, 0, k, targetCents, new ArrayList<>(), out);
+        return out;
+    }
+
+    private static void kSumRecursive(List<Transaction> sorted, int start, int k, long target,
+                                      List<Long> prefixIds, List<List<Long>> out) {
+        int n = sorted.size();
+        if (k == 2) {
+            // two-pointer 2-sum that produces all pairs (including duplicates if amounts repeat)
+            int l = start;
+            int r = n - 1;
+            while (l < r) {
+                long sum = sorted.get(l).amountCents + sorted.get(r).amountCents;
+                if (sum == target) {
+                    Transaction left = sorted.get(l);
+                    Transaction right = sorted.get(r);
+
+                    // Handle duplicates on both ends to output all combinations
+                    long leftAmount = left.amountCents;
+                    long rightAmount = right.amountCents;
+
+                    if (leftAmount == rightAmount) {
+                        // all elements from l..r have same amount; choose any pair
+                        for (int i = l; i <= r; i++) {
+                            for (int j = i + 1; j <= r; j++) {
+                                List<Long> combo = new ArrayList<>(prefixIds.size() + 2);
+                                combo.addAll(prefixIds);
+                                combo.add(sorted.get(i).id);
+                                combo.add(sorted.get(j).id);
+                                out.add(combo);
+                            }
+                        }
+                        return;
+                    } else {
+                        // count duplicates of leftAmount
+                        int l2 = l;
+                        while (l2 < r && sorted.get(l2).amountCents == leftAmount) l2++;
+                        int r2 = r;
+                        while (r2 > l && sorted.get(r2).amountCents == rightAmount) r2--;
+
+                       
+                        for (int i = l; i < l2; i++) {
+                            for (int j = r2 + 1; j <= r; j++) {
+                                List<Long> combo = new ArrayList<>(prefixIds.size() + 2);
+                                combo.addAll(prefixIds);
+                                combo.add(sorted.get(i).id);
+                                combo.add(sorted.get(j).id);
+                                out.add(combo);
+                            }
+                        }
+
+                        l = l2;
+                        r = r2;
+                    }
+                } else if (sum < target) {
+                    l++;
+                } else {
+                    r--;
+                }
+            }
+            return;
+        }
+
+        for (int i = start; i <= n - k; i++) {
+            // Optional pruning (helps a lot for large lists):
+            long minPossible = sorted.get(i).amountCents;
+            long maxPossible = sorted.get(n - 1).amountCents;
+            // very rough pruning; tighter bounds possible using sums of smallest/largest (omitted for clarity)
+            if (k * minPossible > target && minPossible >= 0) break;
+            if (k * maxPossible < target && maxPossible <= 0) continue;
+
+            Transaction pick = sorted.get(i);
+            prefixIds.add(pick.id);
+            kSumRecursive(sorted, i + 1, k - 1, target - pick.amountCents, prefixIds, out);
+            prefixIds.remove(prefixIds.size() - 1);
+        }
+    }
+
+  
+
+    public static void main(String[] args) {
+      
+        List<Transaction> txs = List.of(
+                tx(1, "acc1", "Store A", 500, "10:00"),
+                tx(2, "acc1", "Store B", 300, "10:15"),
+                tx(3, "acc2", "Store C", 200, "10:30"),
+
+               
+                tx(4, "acc2", "Store A", 500, "11:00"),
+                tx(5, "acc3", "Store A", 500, "11:10")
+        );
+
+        long targetTwoSum = 500;
+        System.out.println("findTwoSum(target=500) -> " + findTwoSumAllPairs(txs, targetTwoSum));
+
+        long oneHourMs = Duration.ofHours(1).toMillis();
+        System.out.println("findTwoSumWithin1Hour(target=500) -> " + findTwoSumPairsWithinWindow(txs, targetTwoSum, oneHourMs));
+
+        System.out.println("detectDuplicates() -> " + detectDuplicatesByAmountAndMerchant(txs));
+
+        int k = 3;
+        long targetKSum = 1000;
+        System.out.println("findKSum(k=3, target=1000) -> " + findKSum(txs, k, targetKSum));
+    }
+
+    private static Transaction tx(long id, String accountId, String merchant, long amountDollars, String hhmm) {
+        long amountCents = amountDollars; // prompt uses whole numbers; treat as "cents" for demo simplicity
+        long ts = parseTodayUtcMillis(hhmm);
+        return new Transaction(id, accountId, merchant, amountCents, ts);
+    }
+
+    private static long parseTodayUtcMillis(String hhmm) {
+       
+        LocalDate fixed = LocalDate.of(2026, 3, 12);
+        LocalTime t = LocalTime.parse(hhmm, DateTimeFormatter.ofPattern("HH:mm"));
+        return ZonedDateTime.of(fixed, t, ZoneOffset.UTC).toInstant().toEpochMilli();
+    }
+}
