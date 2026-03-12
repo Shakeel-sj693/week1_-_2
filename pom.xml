@@ -1,0 +1,21 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>multi-module-project</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <module>problem-01-username-checker</module>
+        <module>problem-02-hash-tables</module>
+        <module>problem-03-concurrency-controls</module>
+        <module>problem-04-ttl-cache</module>
+        <module>problem-05-plagiarism-n-grams</module>
+        <module>problem-06-streaming-analytics</module>
+        <module>problem-07-distributed-rate-limiter</module>
+        <module>problem-08-autocomplete-hybrid</module>
+        <module>problem-09-open-addressing-parking</module>
+        <module>problem-10-multi-level-cache</module>
+    </modules>
+</project>
